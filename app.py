@@ -292,7 +292,7 @@ HTML = """<!DOCTYPE html>
   .preview img { width: 100%; display: block; background: #ddd; border-radius: 8px; }
   .preview figcaption { font-size: 12px; color: #555; margin-top: 4px; }
   a.link { color: #111; }
-  .drop { margin-top: 8px; border: 1.5px dashed #bbb; border-radius: 12px; padding: 28px; text-align: center; background: #fff; color: #444; }
+  .drop { margin-top: 8px; border: 1.5px dashed #bbb; border-radius: 12px; padding: 36px 16px; text-align: center; background: #fff; color: #111; cursor: pointer; font-size: 18px; }
   .drop.over { border-color: #111; color: #111; }
   .gallery { margin-top: 16px; display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
   .gallery a { display: block; }
@@ -306,8 +306,8 @@ HTML = """<!DOCTYPE html>
 
   <div id="web" hidden>
     <input id="file" type="file" accept="image/*" multiple hidden>
-    <button id="pickWeb" type="button">Выбрать фото</button>
-    <div id="drop" class="drop">Или перетащи фото сюда</div>
+    <div id="drop" class="drop">Нажми и выбери фото</div>
+    <button id="pickWeb" type="button" class="primary">Выбрать фото</button>
     <button id="goWeb" class="primary" type="button">Сделать белый фон</button>
     <div class="gallery" id="gallery"></div>
     <a id="zip" class="link" hidden href="/api/zip">Скачать все</a>
@@ -328,11 +328,11 @@ HTML = """<!DOCTYPE html>
   </div>
 
   <button id="go" class="primary" type="button">Сделать белый фон</button>
+  </div>
+
   <div class="bar"><div id="bar"></div></div>
   <div class="status" id="status">Загрузка…</div>
   <div class="err" id="err"></div>
-
-  </div>
 
   <div class="preview" id="preview" hidden>
     <figure>
@@ -429,6 +429,7 @@ async function poll() {
   setBusy(busy);
   if (s.phase === "model") go.disabled = true;
   if (WEB) document.getElementById("goWeb").disabled = s.phase === "model" || busyWeb;
+  if (WEB && s.phase === "idle" && !busyWeb && !picked.length) statusEl.textContent = "Нажми на серое поле и выбери фото";
   errEl.textContent = (s.errors || []).join("\\n");
   if (s.preview && s.preview !== lastPreview) {
     lastPreview = s.preview;
@@ -447,17 +448,19 @@ async function poll() {
 }
 function addPicked(list) {
   picked = [...list];
-  document.getElementById("drop").textContent = picked.length ? ("Фото: " + picked.length) : "Или перетащи фото сюда";
+  document.getElementById("drop").textContent = picked.length ? ("Фото: " + picked.length) : "Нажми и выбери фото";
 }
-document.getElementById("pickWeb").onclick = () => document.getElementById("file").click();
-document.getElementById("file").onchange = (e) => addPicked(e.target.files);
 const drop = document.getElementById("drop");
+document.getElementById("pickWeb").onclick = () => filePick();
+drop.onclick = () => filePick();
+function filePick() { document.getElementById("file").click(); }
+document.getElementById("file").onchange = (e) => addPicked(e.target.files);
 drop.ondragover = (e) => { e.preventDefault(); drop.classList.add("over"); };
 drop.ondragleave = () => drop.classList.remove("over");
 drop.ondrop = (e) => { e.preventDefault(); drop.classList.remove("over"); addPicked(e.dataTransfer.files); };
 
 document.getElementById("goWeb").onclick = async () => {
-  if (!picked.length) { errEl.textContent = "Выбери фото"; return; }
+  if (!picked.length) { statusEl.textContent = "Сначала нажми «Выбрать фото»"; return; }
   errEl.textContent = "";
   made = [];
   busyWeb = true;
