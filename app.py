@@ -477,7 +477,7 @@ document.getElementById("goWeb").onclick = async () => {
     });
     if (!r.ok) {
       const t = await r.text();
-      errEl.textContent += picked[i].name + ": " + t + "\n";
+      errEl.textContent += picked[i].name + ": " + t + " | ";
       continue;
     }
     const id = r.headers.get("X-Id");
@@ -533,7 +533,11 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = urlparse(self.path).path
         if path in ("/", "/index.html"):
-            raw = HTML.replace("__WEB__", "true" if WEB else "false").encode("utf-8")
+            page = HTML.replace("__WEB__", "true" if WEB else "false")
+            if WEB:
+                page = page.replace('<div id="web" hidden>', '<div id="web">', 1)
+                page = page.replace('<div id="local">', '<div id="local" hidden>', 1)
+            raw = page.encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(raw)))
