@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """Локальная программа: фон фото становится белым, сам кадр не меняется."""
 
+import io
 import json
 import os
 import subprocess
@@ -8,20 +9,24 @@ import sys
 import tempfile
 import threading
 import time
+import uuid
 import webbrowser
+import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 from PIL import Image, ImageOps
 
-PORT = 8765
+WEB = os.environ.get("WEB") == "1" or bool(os.environ.get("RAILWAY_ENVIRONMENT"))
+PORT = int(os.environ.get("PORT", "8765"))
 MODEL = "isnet-general-use"
-HOST = "127.0.0.1"
+HOST = "0.0.0.0" if WEB else "127.0.0.1"
 EXT = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"}
 
 session = None
 model_error = ""
 lock = threading.Lock()
+outputs = {}
 state = {
     "phase": "model",  # model | idle | run | done | error
     "done": 0,
@@ -120,6 +125,31 @@ def to_white(im):
     if icc:
         out.info["icc_profile"] = icc
     return out
+
+
+def process_upload(data, name):
+    while session is None and not model_error:
+        time.sleep(0.2)
+    if session is None:
+        raise RuntimeError(model_error or "модель не загрузилась")
+    im = Image.open(io.BytesIO(data))
+    im.load()
+    result = to_white(im)
+    bio = io.BytesIO()
+    icc = result.info.get("icc_profile")
+    params = {"quality": 95, "subsampling": 0, "optimize": True}
+    if icc:
+        params["icc_profile"] = icc
+    result.save(bio, "JPEG", **params)
+    raw = bio.getvalue()
+    stem = os.path.splitext(os.path.basename(name or "photo.jpg"))[0]
+    stem = "".join(c for c in stem if c.isalnum() or c in "._- ")[:80] or "photo"
+    rid = uuid.uuid4().hex[:12]
+    with lock:
+        outputs[rid] = (stem + ".jpg", raw)
+        while len(outputs) > 40:
+            outputs.pop(next(iter(outputs)))
+    return rid, raw
 
 
 def save_jpg(im, path):
@@ -262,6 +292,11 @@ HTML = """<!DOCTYPE html>
   .preview img { width: 100%; display: block; background: #ddd; border-radius: 8px; }
   .preview figcaption { font-size: 12px; color: #555; margin-top: 4px; }
   a.link { color: #111; }
+  .drop { margin-top: 8px; border: 1.5px dashed #bbb; border-radius: 12px; padding: 28px; text-align: center; background: #fff; color: #444; }
+  .drop.over { border-color: #111; color: #111; }
+  .gallery { margin-top: 16px; display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .gallery a { display: block; }
+  .gallery img { width: 100%; border-radius: 8px; background: #ddd; }
 </style>
 </head>
 <body>
@@ -269,6 +304,16 @@ HTML = """<!DOCTYPE html>
   <h1>Белый фон</h1>
   <p class="lead">Фон становится белым. Лицо, одежда и цвет остаются как на фото.</p>
 
+  <div id="web" hidden>
+    <input id="file" type="file" accept="image/*" multiple hidden>
+    <button id="pickWeb" type="button">Выбрать фото</button>
+    <div id="drop" class="drop">Или перетащи фото сюда</div>
+    <button id="goWeb" class="primary" type="button">Сделать белый фон</button>
+    <div class="gallery" id="gallery"></div>
+    <a id="zip" class="link" hidden href="/api/zip">Скачать все</a>
+  </div>
+
+  <div id="local">
   <label>Откуда</label>
   <div class="row">
     <input id="src" type="text" placeholder="Папка с фото" spellcheck="false">
@@ -286,6 +331,8 @@ HTML = """<!DOCTYPE html>
   <div class="bar"><div id="bar"></div></div>
   <div class="status" id="status">Загрузка…</div>
   <div class="err" id="err"></div>
+
+  </div>
 
   <div class="preview" id="preview" hidden>
     <figure>
@@ -306,8 +353,18 @@ const errEl = document.getElementById("err");
 const bar = document.getElementById("bar");
 const go = document.getElementById("go");
 const preview = document.getElementById("preview");
+const WEB = __WEB__;
 let files = [];
+let picked = [];
 let lastPreview = 0;
+let made = [];
+let busyWeb = false;
+
+if (WEB) {
+  document.getElementById("web").hidden = false;
+  document.getElementById("local").hidden = true;
+  document.getElementById("preview").hidden = true;
+}
 
 function setBusy(on) {
   go.disabled = on;
@@ -371,6 +428,7 @@ async function poll() {
   const busy = s.phase === "run" || s.phase === "model";
   setBusy(busy);
   if (s.phase === "model") go.disabled = true;
+  if (WEB) document.getElementById("goWeb").disabled = s.phase === "model" || busyWeb;
   errEl.textContent = (s.errors || []).join("\\n");
   if (s.preview && s.preview !== lastPreview) {
     lastPreview = s.preview;
@@ -387,6 +445,62 @@ async function poll() {
     };
   }
 }
+function addPicked(list) {
+  picked = [...list];
+  document.getElementById("drop").textContent = picked.length ? ("Фото: " + picked.length) : "Или перетащи фото сюда";
+}
+document.getElementById("pickWeb").onclick = () => document.getElementById("file").click();
+document.getElementById("file").onchange = (e) => addPicked(e.target.files);
+const drop = document.getElementById("drop");
+drop.ondragover = (e) => { e.preventDefault(); drop.classList.add("over"); };
+drop.ondragleave = () => drop.classList.remove("over");
+drop.ondrop = (e) => { e.preventDefault(); drop.classList.remove("over"); addPicked(e.dataTransfer.files); };
+
+document.getElementById("goWeb").onclick = async () => {
+  if (!picked.length) { errEl.textContent = "Выбери фото"; return; }
+  errEl.textContent = "";
+  made = [];
+  busyWeb = true;
+  document.getElementById("gallery").innerHTML = "";
+  document.getElementById("zip").hidden = true;
+  document.getElementById("goWeb").disabled = true;
+  for (let i = 0; i < picked.length; i++) {
+    statusEl.textContent = (i + 1) + " / " + picked.length + "  " + picked[i].name;
+    bar.style.width = Math.round(100 * i / picked.length) + "%";
+    const r = await fetch("/api/process?name=" + encodeURIComponent(picked[i].name), {
+      method: "POST",
+      headers: {"Content-Type": "application/octet-stream"},
+      body: picked[i]
+    });
+    if (!r.ok) {
+      const t = await r.text();
+      errEl.textContent += picked[i].name + ": " + t + "\n";
+      continue;
+    }
+    const id = r.headers.get("X-Id");
+    made.push(id);
+    const blob = await r.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    const dot = picked[i].name.lastIndexOf(".");
+    a.download = (dot > 0 ? picked[i].name.slice(0, dot) : picked[i].name) + ".jpg";
+    const img = document.createElement("img");
+    img.src = url;
+    a.appendChild(img);
+    document.getElementById("gallery").appendChild(a);
+  }
+  bar.style.width = "100%";
+  statusEl.textContent = "Готово, " + made.length;
+  busyWeb = false;
+  document.getElementById("goWeb").disabled = false;
+  if (made.length) {
+    const zip = document.getElementById("zip");
+    zip.href = "/api/zip?ids=" + made.join(",");
+    zip.hidden = false;
+  }
+};
+
 setInterval(poll, 700);
 poll();
 </script>
@@ -416,7 +530,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = urlparse(self.path).path
         if path in ("/", "/index.html"):
-            raw = HTML.encode("utf-8")
+            raw = HTML.replace("__WEB__", "true" if WEB else "false").encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(raw)))
@@ -440,10 +554,52 @@ class Handler(BaseHTTPRequestHandler):
             with lock:
                 self._json(200, dict(state))
             return
+        if path == "/api/zip":
+            ids = parse_qs(urlparse(self.path).query).get("ids", [""])[0].split(",")
+            bio = io.BytesIO()
+            with zipfile.ZipFile(bio, "w", zipfile.ZIP_DEFLATED) as zf:
+                for rid in ids:
+                    item = outputs.get(rid)
+                    if item:
+                        zf.writestr(item[0], item[1])
+            raw = bio.getvalue()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/zip")
+            self.send_header("Content-Disposition", "attachment; filename=belyy-fon.zip")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+            return
         self.send_error(404)
 
     def do_POST(self):
         path = urlparse(self.path).path
+        if path == "/api/process":
+            n = int(self.headers.get("Content-Length", "0") or 0)
+            if n <= 0 or n > 40 * 1024 * 1024:
+                self._json(400, {"error": "пустое или слишком большое фото"})
+                return
+            data = self.rfile.read(n)
+            name = parse_qs(urlparse(self.path).query).get("name", ["photo.jpg"])[0]
+            try:
+                rid, raw = process_upload(data, name)
+            except Exception as e:
+                msg = str(e).encode("utf-8")
+                self.send_response(500)
+                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.send_header("Content-Length", str(len(msg)))
+                self.end_headers()
+                self.wfile.write(msg)
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "image/jpeg")
+            self.send_header("X-Id", rid)
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+            return
+
         if path == "/api/pick":
             body = self._read_json()
             kind = body.get("kind")
@@ -498,15 +654,17 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    url = f"http://{HOST}:{PORT}"
+    url = f"http://127.0.0.1:{PORT}"
     try:
         httpd = ThreadingHTTPServer((HOST, PORT), Handler)
     except OSError:
-        webbrowser.open(url)
+        if not WEB:
+            webbrowser.open(url)
         print("Уже открыто:", url)
         sys.exit(0)
     threading.Thread(target=load_model, daemon=True).start()
-    threading.Timer(0.7, lambda: webbrowser.open(url)).start()
+    if not WEB:
+        threading.Timer(0.7, lambda: webbrowser.open(url)).start()
     print(url)
     print("Окно не закрывай, пока пользуешься.")
     try:
