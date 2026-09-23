@@ -19,7 +19,7 @@ from PIL import Image, ImageOps
 
 WEB = os.environ.get("WEB") == "1" or bool(os.environ.get("RAILWAY_ENVIRONMENT"))
 PORT = int(os.environ.get("PORT", "8765"))
-MODEL = "isnet-general-use"
+MODEL = "u2netp" if WEB else "isnet-general-use"
 HOST = "0.0.0.0" if WEB else "127.0.0.1"
 EXT = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"}
 
