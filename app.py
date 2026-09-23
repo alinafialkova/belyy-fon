@@ -4,6 +4,7 @@
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -503,7 +504,7 @@ def main():
     except OSError:
         webbrowser.open(url)
         print("Уже открыто:", url)
-        return
+        sys.exit(0)
     threading.Thread(target=load_model, daemon=True).start()
     threading.Timer(0.7, lambda: webbrowser.open(url)).start()
     print(url)
