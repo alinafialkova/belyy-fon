@@ -134,6 +134,13 @@ def process_upload(data, name):
         raise RuntimeError(model_error or "модель не загрузилась")
     im = Image.open(io.BytesIO(data))
     im.load()
+    im = ImageOps.exif_transpose(im)
+    w, h = im.size
+    long_side = max(w, h)
+    if long_side > 1600:
+        scale = 1600 / long_side
+        im = im.resize((max(1, int(w * scale)), max(1, int(h * scale))), Image.Resampling.LANCZOS)
+    print("process", name, im.size, flush=True)
     result = to_white(im)
     bio = io.BytesIO()
     icc = result.info.get("icc_profile")
@@ -420,16 +427,23 @@ go.onclick = async () => {
   poll();
 };
 
+let webNote = "";
 async function poll() {
   const s = await fetch("/api/status").then(r => r.json());
-  statusEl.textContent = s.message || "";
   const pct = s.total ? Math.round(100 * s.done / s.total) : (s.phase === "done" ? 100 : 0);
   bar.style.width = pct + "%";
   const busy = s.phase === "run" || s.phase === "model";
   setBusy(busy);
   if (s.phase === "model") go.disabled = true;
-  if (WEB) document.getElementById("goWeb").disabled = s.phase === "model" || busyWeb;
-  if (WEB && s.phase === "idle" && !busyWeb && !picked.length) statusEl.textContent = "Нажми на серое поле и выбери фото";
+  if (WEB) {
+    document.getElementById("goWeb").disabled = s.phase === "model" || busyWeb;
+    if (webNote) statusEl.textContent = webNote;
+    else if (s.phase === "model") statusEl.textContent = "Готовлю, подожди";
+    else if (picked.length) statusEl.textContent = "Выбрано: " + picked.length + ". Жми «Сделать белый фон»";
+    else statusEl.textContent = "Нажми «Выбрать фото»";
+  } else {
+    statusEl.textContent = s.message || "";
+  }
   errEl.textContent = (s.errors || []).join("\\n");
   if (s.preview && s.preview !== lastPreview) {
     lastPreview = s.preview;
@@ -448,7 +462,8 @@ async function poll() {
 }
 function addPicked(list) {
   picked = [...list];
-  document.getElementById("drop").textContent = picked.length ? ("Фото: " + picked.length) : "Нажми и выбери фото";
+  webNote = "";
+  document.getElementById("drop").textContent = picked.length ? ("Выбрано фото: " + picked.length) : "Нажми и выбери фото";
 }
 const drop = document.getElementById("drop");
 document.getElementById("pickWeb").onclick = () => filePick();
@@ -460,47 +475,56 @@ drop.ondragleave = () => drop.classList.remove("over");
 drop.ondrop = (e) => { e.preventDefault(); drop.classList.remove("over"); addPicked(e.dataTransfer.files); };
 
 document.getElementById("goWeb").onclick = async () => {
-  if (!picked.length) { statusEl.textContent = "Сначала нажми «Выбрать фото»"; return; }
+  if (!picked.length) { webNote = "Сначала нажми «Выбрать фото»"; statusEl.textContent = webNote; return; }
   errEl.textContent = "";
   made = [];
   busyWeb = true;
   document.getElementById("gallery").innerHTML = "";
   document.getElementById("zip").hidden = true;
   document.getElementById("goWeb").disabled = true;
-  for (let i = 0; i < picked.length; i++) {
-    statusEl.textContent = (i + 1) + " / " + picked.length + "  " + picked[i].name;
-    bar.style.width = Math.round(100 * i / picked.length) + "%";
-    const r = await fetch("/api/process?name=" + encodeURIComponent(picked[i].name), {
-      method: "POST",
-      headers: {"Content-Type": "application/octet-stream"},
-      body: picked[i]
-    });
-    if (!r.ok) {
-      const t = await r.text();
-      errEl.textContent += picked[i].name + ": " + t + " | ";
-      continue;
+  try {
+    for (let i = 0; i < picked.length; i++) {
+      webNote = "Делаю " + (i + 1) + " из " + picked.length + ". Не закрывай страницу";
+      statusEl.textContent = webNote;
+      bar.style.width = Math.round(100 * i / picked.length) + "%";
+      const r = await fetch("/api/process?name=" + encodeURIComponent(picked[i].name), {
+        method: "POST",
+        headers: {"Content-Type": "application/octet-stream"},
+        body: picked[i]
+      });
+      if (!r.ok) {
+        webNote = "Не вышло: " + picked[i].name;
+        statusEl.textContent = webNote;
+        continue;
+      }
+      const id = r.headers.get("X-Id");
+      made.push(id);
+      const blob = await r.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      const dot = picked[i].name.lastIndexOf(".");
+      a.download = (dot > 0 ? picked[i].name.slice(0, dot) : picked[i].name) + ".jpg";
+      const img = document.createElement("img");
+      img.src = url;
+      a.appendChild(img);
+      document.getElementById("gallery").appendChild(a);
     }
-    const id = r.headers.get("X-Id");
-    made.push(id);
-    const blob = await r.blob();
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    const dot = picked[i].name.lastIndexOf(".");
-    a.download = (dot > 0 ? picked[i].name.slice(0, dot) : picked[i].name) + ".jpg";
-    const img = document.createElement("img");
-    img.src = url;
-    a.appendChild(img);
-    document.getElementById("gallery").appendChild(a);
+  } catch (e) {
+    webNote = "Связь оборвалась, попробуй ещё раз";
+    statusEl.textContent = webNote;
   }
   bar.style.width = "100%";
-  statusEl.textContent = "Готово, " + made.length;
   busyWeb = false;
   document.getElementById("goWeb").disabled = false;
   if (made.length) {
+    webNote = "Готово. Фото ниже — нажми на него, скачается";
+    statusEl.textContent = webNote;
     const zip = document.getElementById("zip");
     zip.href = "/api/zip?ids=" + made.join(",");
     zip.hidden = false;
+    zip.textContent = "Скачать все";
+    document.getElementById("gallery").scrollIntoView({behavior: "smooth", block: "start"});
   }
 };
 
